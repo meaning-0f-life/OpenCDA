@@ -443,38 +443,21 @@ class AdvCPManager:
                 logger.error("Late attacks require predictions parameter")
                 return predictions if predictions is not None else data
 
-            # Build multi-frame case for late attacks
-            # Late attacks expect: multi_frame_case[frame_id][vehicle_id]
-            # They operate on a 10-frame sequence (0-9) and attack at frame 9
-            multi_frame_case = {}
-            start_frame = max(0, tick_number - 9)
-            for frame_id in range(start_frame, tick_number + 1):
-                # For the current frame (tick_number), use the provided data
-                if frame_id == tick_number:
-                    multi_frame_case[frame_id] = data
-                else:
-                    # For earlier frames, fetch from the dataset
-                    raw_frame_data = self._get_coperception_data(frame_id)
-                    if raw_frame_data:
-                        multi_frame_case[frame_id] = raw_frame_data
-                    else:
-                        logger.warning(f"Missing frame {frame_id} for late attack, skipping")
-
-            # Ensure we have at least some frames
+            # Build multi-frame case from the ring buffer cached by CoperceptionModelManager.
+            # The buffer already holds numpy/python structures (no GPU tensors).
+            # Keys are remapped to 0..9 (oldest=0, newest=9) as required by the attacker.
+            multi_frame_case = self.coperception_manager.get_last_n_raw_frames(10)
             if not multi_frame_case:
-                logger.error("No frames available for late attack")
+                cached_count = len(self.coperception_manager._raw_data_cache)
+                logger.warning(
+                    f"Not enough cached frames for late attack at tick {tick_number}. "
+                    f"Need 10, have {cached_count}. Skipping attack."
+                )
                 return predictions
 
-            # Late attacks require exactly 10 frames (0-9) to function correctly
-            # If we don't have enough frames, skip the attack
-            if len(multi_frame_case) < 10:
-                logger.warning(f"Not enough frames for late attack: have {len(multi_frame_case)}, need 10. Skipping attack.")
-                return predictions
-
-            # Add predictions to the multi-frame case for the ego vehicle (only for current tick)
+            # Current frame is at remapped index 9; add model predictions to it.
             ego_id = self._get_ego_vehicle_id(data)
-            if tick_number in multi_frame_case and ego_id in multi_frame_case[tick_number]:
-                # Convert predictions to numpy arrays if they are tensors
+            if 9 in multi_frame_case and ego_id in multi_frame_case[9]:
                 pred_bboxes = predictions["pred_bboxes"]
                 pred_scores = predictions["pred_scores"]
 
@@ -483,8 +466,8 @@ class AdvCPManager:
                 if hasattr(pred_scores, "cpu"):
                     pred_scores = pred_scores.cpu().numpy()
 
-                multi_frame_case[tick_number][ego_id]["pred_bboxes"] = pred_bboxes
-                multi_frame_case[tick_number][ego_id]["pred_scores"] = pred_scores
+                multi_frame_case[9][ego_id]["pred_bboxes"] = pred_bboxes
+                multi_frame_case[9][ego_id]["pred_scores"] = pred_scores
 
             # Determine attacker and victim vehicles
             attacker_vehicles = self._select_attacker_vehicles(tick_number)
@@ -495,13 +478,17 @@ class AdvCPManager:
             attacker_id = attacker_vehicles[0]
             victim_id = ego_id  # Attack the ego vehicle
 
-            # Select attack target
-            # For late attacks, the attacker's data is in the multi_frame_case structure
-            attack_target = self._select_attack_target(multi_frame_case[tick_number][attacker_id], attacker_id)
+            # Validate that the attacker is present in the current (remapped) frame
+            if 9 not in multi_frame_case or attacker_id not in multi_frame_case[9]:
+                logger.warning(f"Attacker {attacker_id} not found in current frame for late attack")
+                return predictions
+
+            # Select attack target from the current remapped frame
+            attack_target = self._select_attack_target(multi_frame_case[9][attacker_id], attacker_id)
 
             # Prepare attack options
             attack_opts = {
-                "frame_ids": [tick_number],
+                "frame_ids": list(range(10)),
                 "attacker_vehicle_id": attacker_id,
                 "victim_vehicle_id": victim_id,
             }
@@ -512,22 +499,22 @@ class AdvCPManager:
                 if "bboxes" in attack_target:
                     attack_opts["bboxes"] = attack_target["bboxes"]
                 if "positions" in attack_target:
-                    attack_opts["positions"] = {tick_number: attack_target["positions"]}
+                    attack_opts["positions"] = {9: attack_target["positions"]}
 
             # Apply late attack
             try:
                 attacked_case, attack_info = self.attacker.run(multi_frame_case, attack_opts)
 
-                # Extract the modified predictions for the ego vehicle
-                if tick_number in attacked_case and ego_id in attacked_case[tick_number]:
+                # Extract the modified predictions from the current (remapped) frame
+                if 9 in attacked_case and ego_id in attacked_case[9]:
                     modified_predictions = {
-                        "pred_bboxes": attacked_case[tick_number][ego_id].get("pred_bboxes", predictions["pred_bboxes"]),
-                        "pred_scores": attacked_case[tick_number][ego_id].get("pred_scores", predictions["pred_scores"]),
+                        "pred_bboxes": attacked_case[9][ego_id].get("pred_bboxes", predictions["pred_bboxes"]),
+                        "pred_scores": attacked_case[9][ego_id].get("pred_scores", predictions["pred_scores"]),
                         "gt_bboxes": predictions.get("gt_bboxes"),
                     }
                     return modified_predictions
                 else:
-                    logger.warning(f"Late attack did not return data for tick {tick_number}")
+                    logger.warning(f"Late attack did not return data for current frame at tick {tick_number}")
                     return predictions
             except Exception as e:
                 logger.error(f"Late attack failed: {e}")
