@@ -27,30 +27,29 @@ class LidarRemoveLateAttacker(Attacker):
                 multi_vehicle_case = multi_frame_case[frame_id]
                 attacker_id = attack_opts["attacker_vehicle_id"]
                 ego_id = attack_opts["victim_vehicle_id"]
-                # Get ego's lidar_pose to transform world bbox to ego coordinates
+                # Get ego's lidar_pose to transform world bbox to ego/victim frame
                 ego_pose = multi_vehicle_case[ego_id]["lidar_pose"]
-                logger.info(f"[Late Remove] ego_pose(victim)={ego_pose}")
-                
-                # Get bbox in world coordinates from attack_opts
-                #if "bboxes" in attack_opts:
-                #    bbox_world = attack_opts["bboxes"][0]  # single bbox
-                #    # Transform world bbox to ego sensor coordinates
-                #    bbox_ego = bbox_map_to_sensor(bbox_world, ego_pose)
-                #else:
-                #    bbox_ego = None
+                attacker_pose = multi_vehicle_case[attacker_id]["lidar_pose"]
+
+                # Fetch target bbox in world/map coordinates from the attacker's ground truth
                 object_index = multi_vehicle_case[attacker_id]["object_ids"].index(attack_opts["object_id"])
                 bbox_to_remove = multi_vehicle_case[attacker_id]["gt_bboxes"][object_index]
-                #bbox_to_remove_ego = bbox_map_to_sensor(bbox_to_remove, ego_pose)
-                attacker_pose = multi_vehicle_case[attacker_id]['lidar_pose']
-                bbox_to_remove_attacker=bbox_map_to_sensor(bbox_to_remove, attacker_pose)
-                result = self.perception.attack_late(multi_vehicle_case, ego_id, attacker_id, mode="remove", bbox=bbox_to_remove_attacker)
+
+                # Convert world bbox to EGO (victim) sensor frame.
+                # attack_late() will use transformation_matrix (attacker→ego, from OpenCOOD)
+                # to convert this further to attacker frame, ensuring coordinate consistency
+                # with boxes3d produced by delta_to_boxes3d.
+                bbox_to_remove_ego = bbox_map_to_sensor(bbox_to_remove, ego_pose)
+
+                logger.info(f"[Late Remove] bbox_world={bbox_to_remove}")
+                logger.info(f"[Late Remove] bbox_ego(victim sensor)={bbox_to_remove_ego}")
+                logger.info(f"[Late Remove] attacker_pose={attacker_pose}")
+                logger.info(f"[Late Remove] ego_pose(victim)={ego_pose}")
+
+                result = self.perception.attack_late(multi_vehicle_case, ego_id, attacker_id, mode="remove", bbox=bbox_to_remove_ego)
                 case[frame_id][ego_id]["pred_bboxes"] = result["pred_bboxes"]
                 case[frame_id][ego_id]["pred_scores"] = result["pred_scores"]
                 attack_results[-1][ego_id] = {"pred_bboxes": result["pred_bboxes"], "pred_scores": result["pred_scores"]}
-                logger.info(f"[Late Remove] bbox_to_remove(world/map)={bbox_to_remove}")
-                logger.info(f"[Late Remove] attacker_pose={attacker_pose}")
-                #logger.info(f"[Late Remove] [using in attack_late now] bbox_to_remove_ego(victim sensor)={bbox_to_remove_ego}")
-                logger.info(f"[Late Remove] bbox_to_remove_attacker(attacker sensor)={bbox_to_remove_attacker}")
         return case, attack_results
 
     def build_benchmark_meta(self, write: bool = False, max_cnt: int = 500) -> None:
