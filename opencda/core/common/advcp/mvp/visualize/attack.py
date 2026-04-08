@@ -132,7 +132,10 @@ def draw_attack(
                 # ax.set_aspect('equal', adjustable='box')
                 ax.scatter(pointcloud_all[:, 0], pointcloud_all[:, 1], s=0.01, c="white")
 
-                # label the location of attacker and victim
+                # Mark positions of the attacker and victim CAVs.
+                # Green dot  — victim CAV: the vehicle whose perception is being attacked.
+                # Red dot    — attacker CAV: the adversarial vehicle that manipulates
+                #              the bounding boxes observed by the victim.
                 attacker_vehicle_id = attack["attack_meta"]["attacker_vehicle_id"]
                 attacker_vehicle_data = case[frame_id][attacker_vehicle_id]
                 victim_vehicle_id = attack["attack_meta"]["victim_vehicle_id"]
@@ -145,8 +148,19 @@ def draw_attack(
                     victim_pos = victim_pos.tolist()
                 if hasattr(attacker_pos, 'tolist'):
                     attacker_pos = attacker_pos.tolist()
-                ax.scatter(*victim_pos, s=100, c="green")
-                ax.scatter(*attacker_pos, s=100, c="red")
+                ax.scatter(
+                    *victim_pos, s=100, c="green", zorder=5,
+                    label="Victim CAV - subject to attack by the attacker",
+                )
+                ax.scatter(
+                    *attacker_pos, s=100, c="red", zorder=5,
+                    label="Attacker CAV - manipulates bounding boxes in the victim's perception",
+                )
+                # Set subplot title to distinguish normal from attack scenario
+                ax.set_title(
+                    "Normal Case" if case_id == 0 else "Attack Case",
+                    color="white", fontsize=14,
+                )
 
                 # draw gt/result bboxes
                 total_bboxes: List[tuple] = []
@@ -172,23 +186,37 @@ def draw_attack(
                         None,
                         "r"
                     ))
-                # label the position of spoofing/removal as a purple point
+                # Purple/magenta dot — the targeted bounding box: the box that the
+                # attacker removes from the victim's perception (removal attack) or
+                # injects/spoofs into it (spoofing attack).
                 if attack["attack_meta"].get("bboxes") is not None and len(attack["attack_meta"]["bboxes"]) > 0 and case_id == 0:
                     frame_idx = frame_ids.index(frame_id)
                     if frame_idx < len(attack["attack_meta"]["bboxes"]):
                         bbox = attack["attack_meta"]["bboxes"][frame_idx]
                         # Normalize bbox to 1D array with 7 elements
                         bbox_1d = _normalize_bbox(bbox)
-                        # Extract center point (x, y) - the attack target position
+                        # Extract center point (x, y) - position of the attacked box
                         center_x, center_y = bbox_1d[0], bbox_1d[1]
-                        # Draw as a purple point
-                        ax.scatter(center_x, center_y, s=100, c="magenta", marker='o')
+                        ax.scatter(
+                            center_x, center_y, s=100, c="magenta", marker='o', zorder=5,
+                            label="Targeted box - removed/spoofed by the attacker in the victim's perception",
+                        )
                     else:
                         logger.debug(f"Frame index {frame_idx} out of range for bboxes (len={len(attack['attack_meta']['bboxes'])}), skipping")
                 else:
                     logger.debug(f"No bbox data in attack_meta, skipping attack point visualization")
 
                 draw_bbox_2d(ax, total_bboxes)
+
+                # Add a legend so all three elements are clearly labelled in the plot
+                legend = ax.legend(
+                    loc="upper right",
+                    fontsize=9,
+                    framealpha=0.7,
+                    facecolor="black",
+                    edgecolor="white",
+                    labelcolor="white",
+                )
     else:
         raise NotImplementedError()
 
