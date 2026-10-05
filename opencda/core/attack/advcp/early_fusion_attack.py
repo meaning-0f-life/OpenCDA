@@ -55,11 +55,6 @@ from opencood.tools import inference_utils
 from opencood.utils.transformation_utils import x_to_world
 
 from opencda.core.attack.advcp.attack_helper import AdvCPAttackHelper, AdvCPCarMeshHelper
-from opencda.core.attack.advcp.utils.asset_utils import (
-    ADVSHAPE_TEMPLATE_DIMENSIONS_M,
-    advshape_default_divide,
-    advshape_template_mesh,
-)
 from opencda.core.attack.advcp.types import (
     AdvCPAttackResult,
     AdvCPConfig,
@@ -68,6 +63,11 @@ from opencda.core.attack.advcp.types import (
     AgentId,
     AttackerId,
     BoxLwhBottomCenter,
+)
+from opencda.core.attack.advcp.utils.asset_utils import (
+    ADVSHAPE_TEMPLATE_DIMENSIONS_M,
+    advshape_default_divide,
+    advshape_template_mesh,
 )
 
 logger = logging.getLogger("cavise.opencda.opencda.core.attack.advcp.early_fusion_attack")

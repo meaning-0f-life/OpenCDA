@@ -33,6 +33,7 @@ All tests use temporary directories and do not modify the repository.
 from __future__ import annotations
 
 import hashlib
+import json
 import pickle
 import struct
 import tempfile
@@ -916,92 +917,184 @@ class TestDumpGenerationMetadata:
 
 
 # =========================================================================
-# Runtime asset helper (Python >= 3.10 only due to TypeAlias in types.py)
+# Runtime asset helper
 # =========================================================================
 
 _RUNTIME_ASSETS_AVAILABLE: bool = True
 try:
-    from opencda.core.attack.advcp.utils.runtime_assets import AdvCPRuntimeAssetHelper
+    from opencda.core.attack.advcp.utils.runtime_assets import ASSET_FORMAT_VERSION, AdvCPRuntimeAssetHelper
 except ImportError:
     _RUNTIME_ASSETS_AVAILABLE = False
 
 
-@pytest.mark.skipif(
-    not _RUNTIME_ASSETS_AVAILABLE,
-    reason="AdvCPRuntimeAssetHelper requires Python >= 3.10 (TypeAlias in types.py)",
-)
+@pytest.mark.skipif(not _RUNTIME_ASSETS_AVAILABLE, reason="AdvCP runtime asset helper could not be imported")
 class TestAdvCPRuntimeAssetHelper:
     """Runtime asset generation helper."""
 
-    def test_ensure_spoof_assets_generates_missing(self, tmp_output: Path) -> None:
-        config: dict[str, Any] = {
-            "car_mesh_path": str(tmp_output / "car_mesh.ply"),
-            "car_mesh_divide_path": str(tmp_output / "spoof" / "car_mesh_divide.pkl"),
-            "vehicle_blueprint": "vehicle.tesla.model3",
-            "asset_runtime_generation": True,
-        }
-        mesh_path, divide_path = AdvCPRuntimeAssetHelper.ensure_spoof_assets(config)
-        assert mesh_path.exists()
-        assert divide_path.exists()
-        divide = load_divide_pickle(divide_path)
-        assert len(divide) == 8
+    @staticmethod
+    def _spoof_config(**overrides: Any) -> dict[str, Any]:
+        config: dict[str, Any] = {"asset_runtime_generation": True, "vehicle_blueprint": "vehicle.tesla.model3"}
+        config.update(overrides)
+        return config
 
-    def test_ensure_spoof_assets_uses_cache(self, tmp_output: Path) -> None:
+    def test_spoof_without_cache_or_paths_uses_temporary_dir(self) -> None:
+        config = self._spoof_config()
+        mesh_path, divide_path = AdvCPRuntimeAssetHelper.ensure_spoof_assets(config, spoof_paths_explicit=False)
+        assert mesh_path.exists() and divide_path.exists()
+        assert mesh_path.name == "car_mesh.ply"
+        assert config["car_mesh_path"] == str(mesh_path)
+        assert config["car_mesh_divide_path"] == str(divide_path)
+        mesh = read_mesh(mesh_path)
+        assert divide_piece_face_counts(load_divide_pickle(divide_path), mesh.faces)[6:] != [0, 0]
+
+    def test_spoof_generates_missing_explicit_paths(self, tmp_output: Path) -> None:
+        config = self._spoof_config(
+            car_mesh_path=str(tmp_output / "car_mesh.ply"),
+            car_mesh_divide_path=str(tmp_output / "spoof" / "car_mesh_divide.pkl"),
+        )
+        mesh_path, divide_path = AdvCPRuntimeAssetHelper.ensure_spoof_assets(config)
+        assert mesh_path == tmp_output / "car_mesh.ply"
+        assert len(load_divide_pickle(divide_path)) == 8
+        assert (tmp_output / "car_mesh.ply.advcp-meta.json").exists()
+
+    def test_spoof_explicit_paths_resolve_against_config_dir(self, tmp_output: Path) -> None:
+        config = self._spoof_config(car_mesh_path="assets/car.ply", car_mesh_divide_path="assets/car.pkl")
+        mesh_path, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(config, config_dir=tmp_output)
+        assert mesh_path == (tmp_output / "assets" / "car.ply").resolve()
+        assert mesh_path.exists()
+
+    def test_spoof_user_files_are_reused_untouched(self, tmp_output: Path) -> None:
         mesh_path = tmp_output / "car_mesh.ply"
         divide_path = tmp_output / "spoof" / "car_mesh_divide.pkl"
-        mesh_path.parent.mkdir(parents=True, exist_ok=True)
-        box = box_mesh(4.3, 1.91, 1.26)
-        write_ascii_ply(box, mesh_path)
-        dump_divide_pickle(generate_divide_indices(box.vertices, "spoof"), divide_path)
-        mtime_before = mesh_path.stat().st_mtime
-        config: dict[str, Any] = {
-            "car_mesh_path": str(mesh_path),
-            "car_mesh_divide_path": str(divide_path),
-            "asset_runtime_generation": True,
-        }
+        mesh = subdivide_midpoint(box_mesh(4.0, 1.8, 1.5), levels=2)
+        write_ascii_ply(mesh, mesh_path)
+        dump_divide_pickle(generate_divide_indices(mesh.vertices, "spoof"), divide_path)
+        mesh_mtime, divide_mtime = mesh_path.stat().st_mtime_ns, divide_path.stat().st_mtime_ns
+        config = self._spoof_config(car_mesh_path=str(mesh_path), car_mesh_divide_path=str(divide_path))
         AdvCPRuntimeAssetHelper.ensure_spoof_assets(config)
-        assert mesh_path.stat().st_mtime == mtime_before
+        assert mesh_path.stat().st_mtime_ns == mesh_mtime
+        assert divide_path.stat().st_mtime_ns == divide_mtime
 
-    def test_ensure_spoof_assets_disabled(self, tmp_output: Path) -> None:
-        config: dict[str, Any] = {
-            "car_mesh_path": str(tmp_output / "car_mesh.ply"),
-            "car_mesh_divide_path": str(tmp_output / "spoof" / "car_mesh_divide.pkl"),
-            "asset_runtime_generation": False,
-        }
-        mesh_path, divide_path = AdvCPRuntimeAssetHelper.ensure_spoof_assets(config)
-        assert not mesh_path.exists()
-        assert not divide_path.exists()
+    def test_spoof_divide_derived_from_user_mesh(self, tmp_output: Path) -> None:
+        mesh_path = tmp_output / "car_mesh.ply"
+        divide_path = tmp_output / "spoof" / "car_mesh_divide.pkl"
+        user_mesh = subdivide_midpoint(box_mesh(4.0, 1.8, 1.5), levels=3)
+        write_ascii_ply(user_mesh, mesh_path)
+        mesh_mtime = mesh_path.stat().st_mtime_ns
+        config = self._spoof_config(car_mesh_path=str(mesh_path), car_mesh_divide_path=str(divide_path))
+        AdvCPRuntimeAssetHelper.ensure_spoof_assets(config)
+        assert mesh_path.stat().st_mtime_ns == mesh_mtime
+        divide = load_divide_pickle(divide_path)
+        assert max(int(group.max()) for group in divide) < user_mesh.vertices.shape[0]
+        assert max(int(group.max()) for group in divide) >= 98
 
-    def test_ensure_remove_advshape_assets_no_cache_dir(self) -> None:
-        config: dict[str, Any] = {
-            "asset_runtime_generation": True,
-        }
+    def test_spoof_stale_generated_files_are_regenerated(self, tmp_output: Path) -> None:
+        config = self._spoof_config(
+            car_mesh_path=str(tmp_output / "car_mesh.ply"),
+            car_mesh_divide_path=str(tmp_output / "car_mesh_divide.pkl"),
+        )
+        AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(config))
+        changed = dict(config, car_mesh_dimensions=[5.0, 2.0, 1.8])
+        mesh_path, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(changed)
+        size = np.ptp(read_mesh(mesh_path).vertices, axis=0)
+        np.testing.assert_allclose(size, [5.0, 2.0, 1.8], atol=1e-6)
+
+    def test_spoof_cache_reused_for_same_inputs(self, tmp_output: Path) -> None:
+        config = self._spoof_config(asset_cache_dir=str(tmp_output / "cache"))
+        mesh_path, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(config))
+        mtime = mesh_path.stat().st_mtime_ns
+        again, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(config))
+        assert again == mesh_path
+        assert again.stat().st_mtime_ns == mtime
+        metadata = json.loads((mesh_path.parent / "metadata.json").read_text())
+        assert metadata["format_version"] == ASSET_FORMAT_VERSION
+        assert metadata["dimensions_m"] == [4.3, 1.91, 1.26]
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"car_mesh_dimensions": [5.0, 2.0, 1.8]},
+            {"vehicle_blueprint": "vehicle.audi.a2"},
+            {"car_mesh_preserve_aspect": False},
+        ],
+    )
+    def test_spoof_cache_key_covers_generation_inputs(self, tmp_output: Path, override: dict[str, Any]) -> None:
+        base = self._spoof_config(asset_cache_dir=str(tmp_output / "cache"))
+        first, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(base))
+        second, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(base, **override))
+        assert first.parent != second.parent
+
+    def test_spoof_cache_key_covers_source_mesh_content(self, tmp_output: Path) -> None:
+        source = tmp_output / "source.ply"
+        write_ascii_ply(subdivide_midpoint(box_mesh(4.0, 1.8, 1.5), levels=2), source)
+        config = self._spoof_config(asset_cache_dir=str(tmp_output / "cache"), car_mesh_source_path=str(source))
+        first, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(config))
+        write_ascii_ply(subdivide_midpoint(box_mesh(3.0, 1.8, 1.5), levels=2), source)
+        second, _ = AdvCPRuntimeAssetHelper.ensure_spoof_assets(dict(config))
+        assert first.parent != second.parent
+
+    def test_spoof_unknown_blueprint_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown CARLA blueprint"):
+            AdvCPRuntimeAssetHelper.ensure_spoof_assets(self._spoof_config(vehicle_blueprint="vehicle.unknown.foo"), spoof_paths_explicit=False)
+
+    def test_remove_without_cache_or_paths_needs_no_generation(self) -> None:
+        config: dict[str, Any] = {"asset_runtime_generation": True}
+        assert AdvCPRuntimeAssetHelper.ensure_remove_advshape_assets(config) is None
+        assert "remove_adv_shape_divide_path" not in config
+
+    def test_remove_generates_to_explicit_path_without_cache(self, tmp_output: Path) -> None:
+        divide_path = tmp_output / "remove" / "mesh_divide.pkl"
+        config: dict[str, Any] = {"asset_runtime_generation": True, "remove_adv_shape_divide_path": str(divide_path)}
         result = AdvCPRuntimeAssetHelper.ensure_remove_advshape_assets(config)
-        assert result is None
+        assert result == (divide_path, None)
+        template = advshape_template_mesh()
+        for generated, runtime_default in zip(load_divide_pickle(divide_path), advshape_default_divide(template.vertices)):
+            np.testing.assert_array_equal(generated, runtime_default)
 
-    def test_ensure_remove_advshape_assets_generates(self, tmp_output: Path) -> None:
-        cache_dir = tmp_output / "cache"
+    def test_remove_generates_into_cache_with_zero_perturb(self, tmp_output: Path) -> None:
         config: dict[str, Any] = {
             "asset_runtime_generation": True,
-            "asset_cache_dir": str(cache_dir),
+            "asset_cache_dir": str(tmp_output / "cache"),
             "remove_adv_shape_generate_zero_perturb": True,
         }
         result = AdvCPRuntimeAssetHelper.ensure_remove_advshape_assets(config)
         assert result is not None
-        perturb_path, divide_path = result
-        assert divide_path.exists()
-        assert perturb_path.exists()
-        divide = load_divide_pickle(divide_path)
-        assert len(divide) == 10
+        divide_path, perturb_path = result
+        assert perturb_path is not None
+        assert len(load_divide_pickle(divide_path)) == 10
+        assert load_perturbation(perturb_path).shape == (98, 3)
+        assert config["remove_adv_shape_divide_path"] == str(divide_path)
+        assert config["remove_adv_shape_perturb_path"] == str(perturb_path)
 
-    def test_ensure_remove_advshape_assets_updates_config(self, tmp_output: Path) -> None:
-        cache_dir = tmp_output / "cache"
+    def test_remove_user_divide_is_not_overwritten(self, tmp_output: Path) -> None:
+        divide_path = tmp_output / "mesh_divide.pkl"
+        custom = [np.arange(98, dtype=np.int32)] * 10
+        dump_divide_pickle(custom, divide_path)
         config: dict[str, Any] = {
             "asset_runtime_generation": True,
-            "asset_cache_dir": str(cache_dir),
+            "remove_adv_shape_divide_path": str(divide_path),
+            "remove_adv_shape_generate_zero_perturb": True,
         }
-        AdvCPRuntimeAssetHelper.ensure_remove_advshape_assets(config)
-        assert "remove_adv_shape_divide_path" in config
+        _, perturb_path = AdvCPRuntimeAssetHelper.ensure_remove_advshape_assets(config) or (None, None)
+        np.testing.assert_array_equal(load_divide_pickle(divide_path)[0], custom[0])
+        assert perturb_path is not None and perturb_path.exists()
+
+    def test_prepare_assets_disabled_is_noop(self) -> None:
+        config: dict[str, Any] = {"car_mesh_path": "/nonexistent/car.ply", "car_mesh_divide_path": "/nonexistent/car.pkl"}
+        AdvCPRuntimeAssetHelper.prepare_assets(config, None, spoof_paths_explicit=False)
+        assert config["car_mesh_path"] == "/nonexistent/car.ply"
+
+    def test_prepare_assets_ignores_bundle_default_paths(self, tmp_output: Path) -> None:
+        bundle_mesh = tmp_output / "bundle" / "car_mesh_0200.ply"
+        config = self._spoof_config(car_mesh_path=str(bundle_mesh), car_mesh_divide_path=str(tmp_output / "bundle" / "divide.pkl"))
+        AdvCPRuntimeAssetHelper.prepare_assets(config, None, spoof_paths_explicit=False)
+        assert not bundle_mesh.exists()
+        assert Path(config["car_mesh_path"]).exists()
+
+    def test_prepare_assets_with_advshape(self, tmp_output: Path) -> None:
+        config = self._spoof_config(advshape=True, asset_cache_dir=str(tmp_output / "cache"))
+        AdvCPRuntimeAssetHelper.prepare_assets(config, None, spoof_paths_explicit=False)
+        assert Path(config["car_mesh_path"]).exists()
         assert Path(config["remove_adv_shape_divide_path"]).exists()
 
 
