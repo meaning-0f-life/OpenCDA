@@ -7,9 +7,15 @@ Checks:
 - Mesh (.ply) format, vertex/face counts, coordinate frame, and scale.
 - Spoof mesh-divide (.pkl) structure, index bounds, and compatibility with
   the car mesh vertex count.
-- Removal mesh-divide (.pkl) structure, index bounds, and compatibility with
-  the car mesh or AdvCP template mesh vertex count.
-- Removal perturbation (.npy) shape, dtype, and finite values.
+- Removal mesh-divide (.pkl) structure, index bounds, and non-empty mesh
+  pieces of the AdvCP adv-shape template.
+- Removal perturbation (.npy) shape, dtype, finite values, and vertex count
+  of the AdvCP adv-shape template.
+
+Removal assets are indexed against the adv-shape template used by the
+attack runtime (:func:`advshape_template_mesh`, 98 vertices), not against
+``--car-mesh``; ``--advshape-template-vertices`` overrides the expected
+template vertex count.
 
 Exits with code 0 when all checks pass, or 1 with actionable error messages
 when any check fails.
@@ -46,6 +52,7 @@ from pathlib import Path
 
 from opencda.core.attack.advcp.utils.asset_utils import (
     MeshData,
+    advshape_template_mesh,
     load_divide_pickle,
     load_perturbation,
     read_mesh,
@@ -106,10 +113,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Expected vertex count for the AdvCP template mesh used by removal "
-            "divide. When omitted, the removal divide is validated against the "
-            "car mesh vertex count (if --car-mesh is provided), or the check is "
-            "skipped."
+            "Expected vertex count of the adv-shape template that the removal "
+            "divide and perturbation are indexed against. Defaults to the AdvCP "
+            "runtime template (98 vertices). Takes precedence when provided."
         ),
     )
     return parser
@@ -221,64 +227,97 @@ def _validate_spoof_divide(path: Path, car_mesh: MeshData | None) -> None:
     print("  [PASS]")
 
 
+def _resolve_removal_template(template_vertices_override: int | None) -> tuple[int, MeshData | None]:
+    """Resolve the template that removal assets are validated against.
+
+    Parameters
+    ----------
+    template_vertices_override : int or None
+        Value of ``--advshape-template-vertices``. Takes precedence over
+        the runtime template when provided.
+
+    Returns
+    -------
+    tuple
+        ``(vertex_count, template_mesh)``. *template_mesh* is the runtime
+        template when its vertex count is the one being validated, or
+        ``None`` for a custom override (mesh pieces are then not checked).
+
+    Raises
+    ------
+    ValueError
+        If the override is not positive.
+    """
+    template = advshape_template_mesh()
+    runtime_vertex_count = template.vertices.shape[0]
+    if template_vertices_override is None or template_vertices_override == runtime_vertex_count:
+        return runtime_vertex_count, template
+    if template_vertices_override <= 0:
+        raise ValueError(f"--advshape-template-vertices must be positive, got {template_vertices_override}.")
+    print(
+        f"Note: validating removal assets against {template_vertices_override} template vertices; "
+        f"the AdvCP runtime always uses the {runtime_vertex_count}-vertex adv-shape template."
+    )
+    return template_vertices_override, None
+
+
 def _validate_remove_divide(
     path: Path,
-    car_vertex_count: int | None,
-    template_vertex_count: int | None,
+    template_vertex_count: int,
+    template_mesh: MeshData | None,
 ) -> None:
     """Validate a removal mesh-divide ``.pkl`` file.
 
     Checks file existence, that the divide contains exactly 10 groups,
-    and that all indices are valid. The expected vertex count is
-    resolved from *car_vertex_count* first, then *template_vertex_count*.
+    that all indices are valid for the adv-shape template, and (when the
+    template mesh is known) that every group yields a non-empty piece.
 
     Parameters
     ----------
     path : Path
         Path to the ``.pkl`` file.
-    car_vertex_count : int or None
-        Vertex count of the car mesh (used when available).
-    template_vertex_count : int or None
-        Expected vertex count for the AdvCP template mesh (used as
-        fallback when *car_vertex_count* is ``None``).
+    template_vertex_count : int
+        Vertex count of the adv-shape template the indices refer to.
+    template_mesh : MeshData or None
+        The adv-shape template mesh, or ``None`` to skip the mesh-piece
+        check.
 
     Raises
     ------
     FileNotFoundError
         If the file does not exist.
     ValueError
-        If the file is empty, contains the wrong number of groups, or
-        has out-of-bounds indices.
+        If the file is empty, contains the wrong number of groups, has
+        out-of-bounds indices, or a group retains no triangles.
     """
     print(f"Validating removal mesh divide: {path}")
     _check_file_exists(path, "Removal mesh divide")
     indices = load_divide_pickle(path)
     if len(indices) != 10:
         raise ValueError(f"Removal mesh divide must contain exactly 10 index groups, got {len(indices)}.")
-    # Determine the expected vertex count for validation
-    expected_count = car_vertex_count or template_vertex_count
-    if expected_count is not None:
-        validate_divide_indices(indices, expected_count, "Removal mesh divide")
+    validate_divide_indices(indices, template_vertex_count, "Removal mesh divide")
+    if template_mesh is not None:
+        validate_divide_pieces(indices, template_mesh.faces, "Removal mesh divide")
     print(f"  Groups: {len(indices)}")
     for i, g in enumerate(indices):
         print(f"    Group {i}: {g.shape[0]} indices, range [{g.min()}, {g.max()}]")
     print("  [PASS]")
 
 
-def _validate_remove_perturb(path: Path, car_vertex_count: int | None) -> None:
+def _validate_remove_perturb(path: Path, template_vertex_count: int) -> None:
     """Validate a removal perturbation ``.npy`` file.
 
     Checks file existence, that the perturbation has shape (N, 3),
-    contains only finite values, and its vertex count matches the car
-    mesh (when *car_vertex_count* is provided).
+    contains only finite values, and that N matches the adv-shape
+    template vertex count.
 
     Parameters
     ----------
     path : Path
         Path to the ``.npy`` file.
-    car_vertex_count : int or None
-        Vertex count of the corresponding car mesh. When provided, the
-        perturbation's first dimension must match.
+    template_vertex_count : int
+        Vertex count of the adv-shape template the perturbation is
+        applied to.
 
     Raises
     ------
@@ -294,9 +333,10 @@ def _validate_remove_perturb(path: Path, car_vertex_count: int | None) -> None:
     print(f"  Shape: {perturbation.shape}")
     print(f"  Dtype: {perturbation.dtype}")
     print(f"  Range: [{perturbation.min():.6f}, {perturbation.max():.6f}]")
-    if car_vertex_count is not None and perturbation.shape[0] != car_vertex_count:
+    if perturbation.shape[0] != template_vertex_count:
         raise ValueError(
-            f"Removal perturbation vertex count mismatch: car mesh has {car_vertex_count} vertices, perturbation has {perturbation.shape[0]}."
+            f"Removal perturbation vertex count mismatch: adv-shape template has {template_vertex_count} vertices, "
+            f"perturbation has {perturbation.shape[0]}."
         )
     print("  [PASS]")
 
@@ -328,13 +368,11 @@ def main() -> None:
 
     errors: list[str] = []
     car_mesh: MeshData | None = None
-    car_vertex_count: int | None = None
 
     # 1. Validate car mesh (if provided)
     if args.car_mesh is not None:
         try:
             car_mesh = _validate_car_mesh(args.car_mesh, args.expected_vertices)
-            car_vertex_count = car_mesh.vertices.shape[0]
         except (FileNotFoundError, ValueError) as exc:
             errors.append(str(exc))
 
@@ -345,23 +383,23 @@ def main() -> None:
         except (FileNotFoundError, ValueError) as exc:
             errors.append(str(exc))
 
-    # 3. Validate removal mesh divide (if provided)
-    if args.remove_divide is not None:
+    # 3-4. Removal assets are indexed against the adv-shape template, not the car mesh
+    if args.remove_divide is not None or args.remove_perturb is not None:
         try:
-            _validate_remove_divide(
-                args.remove_divide,
-                car_vertex_count,
-                args.advshape_template_vertices,
-            )
-        except (FileNotFoundError, ValueError) as exc:
+            template_vertex_count, template_mesh = _resolve_removal_template(args.advshape_template_vertices)
+        except ValueError as exc:
             errors.append(str(exc))
-
-    # 4. Validate removal perturbation (if provided)
-    if args.remove_perturb is not None:
-        try:
-            _validate_remove_perturb(args.remove_perturb, car_vertex_count)
-        except (FileNotFoundError, ValueError) as exc:
-            errors.append(str(exc))
+        else:
+            if args.remove_divide is not None:
+                try:
+                    _validate_remove_divide(args.remove_divide, template_vertex_count, template_mesh)
+                except (FileNotFoundError, ValueError) as exc:
+                    errors.append(str(exc))
+            if args.remove_perturb is not None:
+                try:
+                    _validate_remove_perturb(args.remove_perturb, template_vertex_count)
+                except (FileNotFoundError, ValueError) as exc:
+                    errors.append(str(exc))
 
     if errors:
         print("\nValidation FAILED with the following errors:")

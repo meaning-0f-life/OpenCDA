@@ -21,6 +21,7 @@ import pytest
 
 from opencda.core.attack.advcp.utils.asset_utils import (
     MeshData,
+    advshape_template_mesh,
     box_mesh,
     copy_or_generate_mesh,
     dump_divide_pickle,
@@ -28,6 +29,7 @@ from opencda.core.attack.advcp.utils.asset_utils import (
     load_divide_pickle,
     read_mesh,
     save_perturbation,
+    subdivide_midpoint,
     write_ascii_ply,
 )
 
@@ -220,15 +222,101 @@ class TestValidateAdvcpAssetsCLI:
 
         main()  # should not raise
 
+    @staticmethod
+    def _run_validator(*arguments: str) -> None:
+        sys.argv = ["validate_advcp_assets", *arguments]
+        from scripts.advcp.validate_advcp_assets import main
+
+        main()
+
+    @staticmethod
+    def _generate_removal_assets(tmp_output: Path) -> tuple[Path, Path]:
+        """Generate removal assets with the removal CLI (default adv-shape template)."""
+        divide_path = tmp_output / "remove.pkl"
+        perturb_path = tmp_output / "perturb.npy"
+        sys.argv = [
+            "generate_remove_advshape_assets",
+            "--mode",
+            "both",
+            "--divide-output",
+            str(divide_path),
+            "--perturb-output",
+            str(perturb_path),
+        ]
+        from scripts.advcp.generate_remove_advshape_assets import main
+
+        main()
+        return divide_path, perturb_path
+
+    def test_validate_all_generated_assets(self, tmp_output: Path) -> None:
+        """Documented workflow: car mesh and removal template have different vertex counts."""
+        car_mesh = subdivide_midpoint(box_mesh(4.3, 1.91, 1.26), levels=3)
+        assert car_mesh.vertices.shape[0] != advshape_template_mesh().vertices.shape[0]
+        mesh_path = tmp_output / "mesh.ply"
+        write_ascii_ply(car_mesh, mesh_path)
+        spoof_path = tmp_output / "spoof.pkl"
+        dump_divide_pickle(generate_divide_indices(car_mesh.vertices, "spoof"), spoof_path)
+        remove_path, perturb_path = self._generate_removal_assets(tmp_output)
+        self._run_validator(
+            "--car-mesh",
+            str(mesh_path),
+            "--spoof-divide",
+            str(spoof_path),
+            "--remove-divide",
+            str(remove_path),
+            "--remove-perturb",
+            str(perturb_path),
+        )
+
+    def test_validate_removal_assets_without_car_mesh(self, tmp_output: Path) -> None:
+        remove_path, perturb_path = self._generate_removal_assets(tmp_output)
+        self._run_validator("--remove-divide", str(remove_path), "--remove-perturb", str(perturb_path))
+
+    def test_validate_fails_on_car_sized_perturbation(self, sample_box_mesh: MeshData, tmp_output: Path) -> None:
+        """A perturbation sized for the car mesh does not fit the adv-shape template."""
+        perturb_path = tmp_output / "perturb.npy"
+        save_perturbation(perturb_path, np.zeros((sample_box_mesh.vertices.shape[0], 3), dtype=np.float32))
+        with pytest.raises(SystemExit):
+            self._run_validator("--remove-perturb", str(perturb_path))
+
+    def test_validate_fails_on_out_of_range_removal_divide(self, tmp_output: Path) -> None:
+        remove_path = tmp_output / "remove.pkl"
+        dump_divide_pickle([np.array([0, 1, 500], dtype=np.int32)] * 10, remove_path)
+        with pytest.raises(SystemExit):
+            self._run_validator("--remove-divide", str(remove_path))
+
+    def test_validate_fails_on_empty_removal_pieces(self, tmp_output: Path) -> None:
+        """Groups of isolated vertices keep no template triangles."""
+        remove_path = tmp_output / "remove.pkl"
+        dump_divide_pickle([np.array([0, 1], dtype=np.int32)] * 10, remove_path)
+        with pytest.raises(SystemExit):
+            self._run_validator("--remove-divide", str(remove_path))
+
+    def test_template_vertices_override_takes_precedence(self, sample_box_mesh: MeshData, tmp_output: Path) -> None:
+        remove_path = tmp_output / "remove.pkl"
+        dump_divide_pickle(generate_divide_indices(sample_box_mesh.vertices, "remove"), remove_path)
+        perturb_path = tmp_output / "perturb.npy"
+        save_perturbation(perturb_path, np.zeros((8, 3), dtype=np.float32))
+        with pytest.raises(SystemExit):
+            self._run_validator("--remove-perturb", str(perturb_path))
+        self._run_validator(
+            "--advshape-template-vertices",
+            "8",
+            "--remove-divide",
+            str(remove_path),
+            "--remove-perturb",
+            str(perturb_path),
+        )
+
     def test_validate_all_assets(self, sample_car_mesh: MeshData, tmp_output: Path) -> None:
         mesh_path = tmp_output / "mesh.ply"
         write_ascii_ply(sample_car_mesh, mesh_path)
         spoof_path = tmp_output / "spoof.pkl"
         dump_divide_pickle(generate_divide_indices(sample_car_mesh.vertices, "spoof"), spoof_path)
         remove_path = tmp_output / "remove.pkl"
-        dump_divide_pickle(generate_divide_indices(sample_car_mesh.vertices, "remove"), remove_path)
+        dump_divide_pickle(generate_divide_indices(advshape_template_mesh().vertices, "remove"), remove_path)
         perturb_path = tmp_output / "perturb.npy"
-        save_perturbation(perturb_path, np.zeros((sample_car_mesh.vertices.shape[0], 3), dtype=np.float32))
+        save_perturbation(perturb_path, np.zeros((advshape_template_mesh().vertices.shape[0], 3), dtype=np.float32))
         sys.argv = [
             "validate_advcp_assets",
             "--car-mesh",
