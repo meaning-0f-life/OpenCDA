@@ -74,21 +74,39 @@ class MeshData:
 def blueprint_dimensions_m(blueprint: str | None) -> tuple[float, float, float]:
     """Return the (length, width, height) in meters for a CARLA blueprint.
 
+    This is a lookup in a small table of approximate dimensions; no CARLA
+    geometry is queried. Blueprint-based generation therefore produces a
+    *generic box* with the vehicle's footprint, not the vehicle's shape.
+    For a faithful shape, export the CARLA vehicle mesh and pass it as an
+    external mesh input.
+
     Parameters
     ----------
     blueprint : str or None
         CARLA blueprint identifier (e.g. ``"vehicle.tesla.model3"``).
-        When ``None`` or unknown, default Tesla Model 3 dimensions are
-        returned.
+        ``None`` selects the default (Tesla Model 3) dimensions.
 
     Returns
     -------
     tuple of float
         ``(length, width, height)`` in meters.
+
+    Raises
+    ------
+    ValueError
+        If *blueprint* is not in the lookup table. Pass explicit
+        dimensions instead.
     """
     if blueprint is None:
         return _DEFAULT_DIMENSIONS_M
-    return _BLUEPRINT_DIMENSIONS_M.get(blueprint, _DEFAULT_DIMENSIONS_M)
+    try:
+        return _BLUEPRINT_DIMENSIONS_M[blueprint]
+    except KeyError:
+        known = ", ".join(sorted(_BLUEPRINT_DIMENSIONS_M))
+        raise ValueError(
+            f"Unknown CARLA blueprint '{blueprint}': no dimensions are known for it. "
+            f"Pass explicit dimensions (--dimensions / car_mesh_dimensions) or an external mesh. Known blueprints: {known}."
+        ) from None
 
 
 def parse_dimensions_arg(raw_dimensions: Iterable[float] | None) -> tuple[float, float, float] | None:

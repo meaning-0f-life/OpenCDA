@@ -155,9 +155,9 @@ class TestBlueprintDimensions:
         assert blueprint_dimensions_m("vehicle.tesla.model3") == (4.30, 1.91, 1.26)
         assert blueprint_dimensions_m("vehicle.audi.a2") == (3.70, 1.70, 1.55)
 
-    def test_unknown_blueprint_falls_back_to_default(self) -> None:
-        dims = blueprint_dimensions_m("vehicle.unknown.foo")
-        assert dims == (4.30, 1.91, 1.26)
+    def test_unknown_blueprint_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown CARLA blueprint 'vehicle.unknown.foo'"):
+            blueprint_dimensions_m("vehicle.unknown.foo")
 
     def test_none_blueprint_falls_back_to_default(self) -> None:
         dims = blueprint_dimensions_m(None)

@@ -92,6 +92,24 @@ class TestGenerateCarMeshCLI:
         size = mesh.vertices.max(axis=0) - mesh.vertices.min(axis=0)
         np.testing.assert_allclose(size, [5.0, 2.0, 1.8], atol=1e-6)
 
+    def test_unknown_blueprint_is_rejected(self, tmp_output: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        out = tmp_output / "car.ply"
+        sys.argv = ["generate_car_mesh", "--vehicle-blueprint", "vehicle.unknown.foo", "--output", str(out)]
+        from scripts.advcp.generate_car_mesh import main
+
+        with pytest.raises(SystemExit):
+            main()
+        assert "Unknown CARLA blueprint 'vehicle.unknown.foo'" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_unknown_blueprint_with_dimensions(self, tmp_output: Path) -> None:
+        out = tmp_output / "car.ply"
+        sys.argv = ["generate_car_mesh", "--vehicle-blueprint", "vehicle.unknown.foo", "--dimensions", "4.0", "1.8", "1.5", "--output", str(out)]
+        from scripts.advcp.generate_car_mesh import main
+
+        main()
+        assert out.exists()
+
 
 class TestGenerateMeshDivideCLI:
     """Smoke tests for generate_mesh_divide CLI."""

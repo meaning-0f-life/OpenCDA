@@ -7,8 +7,11 @@ configurations.
 
 The mesh can be constructed in two ways:
 
-1. **From a CARLA blueprint** — a simple box mesh is generated using the
-   blueprint's known dimensions (or user-supplied dimensions).
+1. **Generic box** — a subdivided box with the footprint of a CARLA
+   blueprint, looked up in a small table of approximate dimensions (or
+   user-supplied ``--dimensions``). No CARLA geometry is queried, so this
+   approximates only the vehicle's size, not its shape; unknown blueprints
+   are rejected unless ``--dimensions`` is given.
 2. **From an external mesh file** — a ``.ply`` or ``.obj`` file is loaded,
    normalised to a bottom-centre frame, and scaled to the target dimensions.
 
@@ -59,7 +62,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dimensions, aspect-preservation flag, and output path.
     """
     parser = argparse.ArgumentParser(description="Generate AdvCP-compatible vehicle mesh (.ply).")
-    parser.add_argument("--vehicle-blueprint", type=str, default="vehicle.tesla.model3", help="CARLA blueprint id.")
+    parser.add_argument(
+        "--vehicle-blueprint",
+        type=str,
+        default="vehicle.tesla.model3",
+        help="CARLA blueprint id whose approximate dimensions size the generic box (ignored with --dimensions).",
+    )
     parser.add_argument("--mesh-input", type=Path, default=None, help="Optional external .ply/.obj mesh input.")
     parser.add_argument(
         "--dimensions",
@@ -81,8 +89,12 @@ def main() -> None:
     or blueprint lookup), generates or copies the mesh, writes the
     result to the output path, and prints a summary.
     """
-    args = _build_parser().parse_args()
-    dimensions = parse_dimensions_arg(args.dimensions) or blueprint_dimensions_m(args.vehicle_blueprint)
+    parser = _build_parser()
+    args = parser.parse_args()
+    try:
+        dimensions = parse_dimensions_arg(args.dimensions) or blueprint_dimensions_m(args.vehicle_blueprint)
+    except ValueError as exc:
+        parser.error(str(exc))
     mesh = copy_or_generate_mesh(args.mesh_input, dimensions=dimensions, preserve_aspect=args.preserve_aspect)
     write_mesh(args.output, mesh)
     print(f"Generated car mesh: {args.output}")
